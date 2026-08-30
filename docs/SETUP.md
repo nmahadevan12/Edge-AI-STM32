@@ -22,7 +22,7 @@ Complete environment setup for the STM32L475 Edge AI wake-word engine.
 
 Do **not** connect TTL TX to the board unless you intend to send data into the MCU.
 
-Serial settings: **115200 baud, 8 data bits, 2 stop bits, no parity (8N2)**.
+Serial settings: **921600 baud, 8 data bits, 2 stop bits, no parity (8N2)**.
 
 Find the serial device:
 

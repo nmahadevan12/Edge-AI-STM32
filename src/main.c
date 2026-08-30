@@ -94,7 +94,7 @@ typedef struct
 
 /* UART */
 #define UART4_EN        (1 << 19)
-#define BAUD_DIV_115200 (139) // Clock Hz (16 MHz), 115200
+#define BAUD_DIV_921600 (17) // Clock Hz (16 MHz) / 921600 ≈ 17.36 → 17
 #define WORD_LENGTH_1   (0 << 28) // M1
 #define WORD_LENGTH_0   (0 << 12) // M0
 #define WORD_LENGTH     (WORD_LENGTH_1 | WORD_LENGTH_0)
@@ -143,15 +143,18 @@ typedef struct
 #define REOCF           (1 << 1)
 
 /* Analyze Mic Data */
-#define DEBOUNCE_VAL    (30)
+#define DEBOUNCE_VAL    (20)
 #define CAPACITY        (256)
+#define ENERGY_LOUD     (1500)
+#define REARM_DELAY     (500)
 
 uint32_t timer = 0; // defined globally since it's used for interrupts
+uint16_t rearm_delay = REARM_DELAY;
 int32_t sample_buffer[CAPACITY]; // 1024 bytes total (y = 4 bytes)
 static uint16_t index = 0;
 static uint16_t loud_count = 0;
+static uint16_t low_count = 0;
 static uint8_t capturing = 0;
-static uint8_t low_count = 0;
 
 struct DC_Blocker
 {
@@ -178,7 +181,7 @@ void UART_Setup(void)
     RCC_CR &= MSI_MASK; // clear MSI bits
     RCC_CR |= MSI_CLK_SEL; // set MSI to 16 MHz, sets MSI = 1000;  use MSI range provided in RCC_CR (16 MHz)
 
-    USART_BRR = BAUD_DIV_115200;
+    USART_BRR = BAUD_DIV_921600;
 
     USART_CR1 |= UART_ENABLE;
 }
@@ -197,55 +200,122 @@ void UART_Transmit(char buff)
     USART_TDR = buff; // sets Transmit Data Register = buff
 }
 
-void UART_Transmit_Ptr(unsigned char *buff)
+void UART_Transmit_Ptr(unsigned char *buff, uint8_t setting)
 {
     uint8_t i;
-    for (i = 0; i < 4; i++) // runs four times
+
+    if (setting == 1)
     {
         UART_Transmit(*buff);
-        buff++;
+    }
+
+    else if (setting == 2)
+    {
+        for (i = 0; i < 2; i++) // runs two times
+        {
+            UART_Transmit(*buff);
+            buff++;
+        }
+    }
+
+    else if (setting == 3)
+    {
+        for (i = 0; i < 3; i++) // runs three times
+        {
+            UART_Transmit(*buff);
+            buff++;
+        }
+    }
+
+    else if (setting == 4)
+    {
+        for (i = 0; i < 4; i++) // runs four times
+        {
+            UART_Transmit(*buff);
+            buff++;
+        }
     }
 }
 
-void Convert_Uint_To_Bytes(uint32_t value) // uint32_t, big endian
+void Convert_Uint_To_Bytes(uint32_t value, uint8_t setting) // uint32_t, big endian
 {
-    unsigned char buffer[4]; // buffer = 4 bytes
+    if (setting == 1)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
 
-    buffer[0] = (unsigned char) ((value & 0xFF000000UL) >> 24); // LSR 3 bytes
-    buffer[1] = (unsigned char) ((value & 0x00FF0000UL) >> 16); // LSR 2 bytes
-    buffer[2] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
-    buffer[3] = (unsigned char) (value  & 0x000000FFUL);
-    UART_Transmit_Ptr(buffer);
+        buffer[0] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
+
+    else if (setting == 2)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
+
+        buffer[0] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
+        buffer[1] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
+
+    else if (setting == 4)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
+
+        buffer[0] = (unsigned char) ((value & 0xFF000000UL) >> 24); // LSR 3 bytes
+        buffer[1] = (unsigned char) ((value & 0x00FF0000UL) >> 16); // LSR 2 bytes
+        buffer[2] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
+        buffer[3] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
 }
 
-void Convert_Int_To_Bytes(int32_t value) // int32_t, big endian
+void Convert_Int_To_Bytes(int32_t value, uint8_t setting) // int32_t, big endian
 {
-    unsigned char buffer[4]; // buffer = 4 bytes
+    if (setting == 1)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
 
-    buffer[0] = (unsigned char) ((value & 0xFF000000UL) >> 24); // LSR 3 bytes
-    buffer[1] = (unsigned char) ((value & 0x00FF0000UL) >> 16); // LSR 2 bytes
-    buffer[2] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
-    buffer[3] = (unsigned char) (value  & 0x000000FFUL);
-    UART_Transmit_Ptr(buffer);
+        buffer[0] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
+
+    else if (setting == 2)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
+
+        buffer[0] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
+        buffer[1] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
+
+    else if (setting == 4)
+    {
+        unsigned char buffer[4]; // buffer = 4 bytes
+
+        buffer[0] = (unsigned char) ((value & 0xFF000000UL) >> 24); // LSR 3 bytes
+        buffer[1] = (unsigned char) ((value & 0x00FF0000UL) >> 16); // LSR 2 bytes
+        buffer[2] = (unsigned char) ((value & 0x0000FF00UL) >> 8);  // LSR 1 byte
+        buffer[3] = (unsigned char) (value  & 0x000000FFUL);
+        UART_Transmit_Ptr(buffer, setting);
+    }
 }
 
 void Send_Sample_Buffer(void)
 {
-    uint32_t marker_byte_start = 0xFFFFFFFF; // start indicator
-    uint32_t marker_byte_end = 0; // end indicator
+    uint8_t setting = 4;
     uint16_t index_counter;
 
-    Convert_Uint_To_Bytes(marker_byte_start); // send start indicator
+    /* 4-byte markers — 1-byte 0xFF collides with negative PCM MSB */
+    Convert_Uint_To_Bytes(0xFFFFFFFFUL, setting);
 
     for (index_counter = 0; index_counter < CAPACITY; index_counter++)
     {
-        Convert_Int_To_Bytes(sample_buffer[index_counter]); // send 4 byte data (related to index_counter)
+        Convert_Int_To_Bytes(sample_buffer[index_counter], setting);
     }
 
-    Convert_Uint_To_Bytes(marker_byte_end); // send end indicator
+    Convert_Uint_To_Bytes(0x00000000UL, setting);
 }
 
-// Capture exactly CAPACITY PCM samples after the first time energy > 500
+// Capture exactly CAPACITY PCM samples after the first time energy > 1000
 // After CAPACITY samples, keep/send only if loud_count >= DEBOUNCE_VAL
 void Sound_Detect(uint32_t energy, int32_t y)
 {
@@ -255,13 +325,24 @@ void Sound_Detect(uint32_t energy, int32_t y)
         index = 0;
         loud_count = 0;
         low_count = 0;
-        Convert_Uint_To_Bytes(0);
+        UART_Transmit(0);
         return;
     }
 
-    if (!capturing) // captures after first loud sample (> 500)
+    if (rearm_delay > 0)
     {
-        if (energy > 500)
+        if (energy <= ENERGY_LOUD)
+        {
+            rearm_delay--;
+        }
+
+        UART_Transmit(0);
+        return;
+    }
+
+    if (!capturing) // captures after first loud sample (> 1000)
+    {
+        if (energy > ENERGY_LOUD)
         {
             // initialize variables/flags
             capturing = 1;
@@ -271,23 +352,23 @@ void Sound_Detect(uint32_t energy, int32_t y)
         }
         else
         {
-            Convert_Uint_To_Bytes(0); // sends 4 byte number for formatting constraints
+            UART_Transmit(0);
             return;
         }
     }
 
     sample_buffer[index] = y; // store PCM y for all CAPACITY samples
 
-    if (energy > 500) 
+    if (energy > ENERGY_LOUD) 
     {
-        loud_count++; // if energy > 500, increment loud_count AND index
+        loud_count++; // if energy > 1000, increment loud_count AND index
         low_count = 0; // reset low_count
     }
-    else low_count++; // if energy <= 500, increment low_count
+    else low_count++; // if energy <= 1000, increment low_count
 
     index++;
 
-    if ((low_count > 250)  && (loud_count < DEBOUNCE_VAL))// if low_count > 250 AND loud_count < 30, restart sampling
+    if ((low_count > 750)  && (loud_count < DEBOUNCE_VAL))// if low_count > 250 AND loud_count < 30, restart sampling
     {
         // re-initialize variables/flags
         index = 0;
@@ -298,7 +379,7 @@ void Sound_Detect(uint32_t energy, int32_t y)
 
     if (index >= CAPACITY) // if index reaches 256, index max = 255
     {
-        if (loud_count >= DEBOUNCE_VAL) // tracks the amount of val > 500
+        if (loud_count >= DEBOUNCE_VAL) // tracks the amount of val > 1000
         {
             Send_Sample_Buffer(); // send sample_buffer
         }
@@ -308,13 +389,16 @@ void Sound_Detect(uint32_t energy, int32_t y)
         index = 0;
         loud_count = 0;
         low_count = 0;
+        rearm_delay = REARM_DELAY;
     }
 
-    Convert_Uint_To_Bytes((loud_count >= DEBOUNCE_VAL) ? 1 : 0);
+    UART_Transmit((loud_count >= DEBOUNCE_VAL) ? 1 : 0);
 }
 
 void Update_Energy(struct Update_Energy *select, int32_t y)
 {
+    uint8_t setting = 4;
+
     uint32_t abs_y; // absolute y
     if (y < 0) abs_y = -y; // take magnitude (not direction) of y
     else abs_y = y;
@@ -323,16 +407,18 @@ void Update_Energy(struct Update_Energy *select, int32_t y)
     uint32_t val_2 = (1 - select->alpha) * select->energy; // val_2 = (1-a)*energy
     select->energy = val_1 + val_2; // energy = val_1 + val_2
 
-    Convert_Uint_To_Bytes(select->energy);
+    Convert_Uint_To_Bytes(select->energy, setting);
     Sound_Detect(select->energy, y);
 }
 
 void DC_Blocker(struct DC_Blocker *select, int32_t x)
 {
+    uint8_t setting = 4;
+
     int32_t y = x  - select->x_prev + (select->R)*(select->y_prev); // y = x - x_prev + R*y_prev
     select->x_prev = x; // x_prev = x
     select->y_prev = y; // y_prev = y
-    Convert_Int_To_Bytes(y); // pass in 32-bit mic_data number
+    Convert_Int_To_Bytes(y, setting); // pass in 32-bit mic_data number
     Update_Energy(&energy, y); // call update energy function; pass in energy struct and y
 }
 
@@ -423,14 +509,15 @@ int main(void)
     SysTick_Init(); // initialize SysTick
     Mic_Setup(); // setup mic
     DFSDM_Setup(); // digital filter setup
+    uint8_t setting = 4;
 
     volatile uint16_t delay;
 
     while (1)
     {
         Get_Mic_Sample();
-        Convert_Uint_To_Bytes(timer); // transmit Timer on D1, PA0
-        for (delay = 0; delay < 10000; delay++);
+        Convert_Uint_To_Bytes(timer, setting); // transmit Timer on D1, PA0
+        for (delay = 0; delay < 5000; delay++);
     }
     return 0; // never reached
 }

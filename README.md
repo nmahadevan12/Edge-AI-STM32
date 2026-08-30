@@ -32,9 +32,9 @@ Register-level firmware and host tooling for an on-device wake-word engine on th
 ```text
 MEMS mic (PDM) → DFSDM (Sinc3) → DC blocker → EMA energy → Sound_Detect
                                                               │
-                              UART4 @ 115200 8N2 (PA0 / D1) ←─┘
-                                 ├─ 16-byte live frames
-                                 └─ 1032-byte event dumps
+                              UART4 @ 921600 8N2 (PA0 / D1) ←─┘
+                                 ├─ 13-byte live frames
+                                 └─ 1026-byte event dumps
 ```
 
 Capture summary: start on first `energy > 500`, store every PCM sample for 256 frames, keep/send only if ≥ `DEBOUNCE_VAL` loud frames; abort early if quiet too long before debounce. Details and equations: [SIGNAL_PROCESSING.md](docs/SIGNAL_PROCESSING.md).
@@ -50,7 +50,7 @@ Full install and wiring: **[SETUP.md](docs/SETUP.md)**. Everyday workflow: **[PR
 brew install arm-none-eabi-gcc openocd
 pip install pyserial matplotlib
 
-# 2. Wire USB-TTL RX → Arduino D1 (PA0), GND → GND  (115200 8N2)
+# 2. Wire USB-TTL RX → Arduino D1 (PA0), GND → GND  (921600 8N2)
 
 # 3. Build & flash
 make clean && make

@@ -1,0 +1,4 @@
+.venv/
+ml/artifacts/
+__pycache__/
+.ipynb_checkpoints/

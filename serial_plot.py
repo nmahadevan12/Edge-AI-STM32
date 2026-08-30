@@ -2,15 +2,14 @@
 """Waveform viewer for mic_capture.csv + buffer_dump_NNN.csv from serial_monitor.py.
 
 CSV: timer_ms,sample,energy,flag
-flag column = UART debounce_passed (30 loud samples), not energy>500.
-16-byte UART frame: sample, energy, debounce_passed, timer
-Buffer dump CSV: index,y  (256 signed int32 samples per event)
+flag column = UART debounce_passed (1 byte; loud_count >= DEBOUNCE_VAL), not energy>500.
+13-byte UART frame: sample(4), energy(4), debounce(1), timer(4)
+Buffer dump: 0xFFFFFFFF + 256×int32 + 0x00000000 (1032 bytes) → CSV index,y
 """
 
 import argparse
 import sys
 import time
-from collections import deque
 from pathlib import Path
 
 try:
@@ -24,7 +23,9 @@ DEFAULT_LOG = Path(__file__).resolve().parent / "mic_capture.csv"
 DEFAULT_DUMP_DIR = Path(__file__).resolve().parent
 FULL_SCALE = 262144  # Sinc3, FOSR 64
 QUIET_MAX_START_MS = 1000  # ignore warm-up before tracking quiet max
-ENERGY_LOUD = 500  # firmware Sound_Detect threshold
+ENERGY_LOUD = 1000  # match firmware ENERGY_LOUD in Sound_Detect
+# If the plotter falls behind the CSV, jump to near EOF (follow mode only)
+CATCHUP_BYTES = 64 * 1024
 
 
 def load_dump(path: Path):
@@ -49,8 +50,17 @@ def load_dump(path: Path):
 
 def latest_dump(dump_dir: Path):
     """Return the most recently modified buffer_dump_*.csv, or None."""
-    dumps = sorted(dump_dir.glob("buffer_dump_*.csv"), key=lambda p: p.stat().st_mtime)
-    return dumps[-1] if dumps else None
+    latest = None
+    latest_mtime = -1.0
+    for p in dump_dir.glob("buffer_dump_*.csv"):
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if m >= latest_mtime:
+            latest_mtime = m
+            latest = p
+    return latest
 
 
 def parse_line(line: str):
@@ -71,21 +81,38 @@ def parse_line(line: str):
     return None
 
 
-def load_all(path: Path, times, samples, energies, flags) -> int:
+def trim_history(times, samples, energies, flags, history: int) -> None:
+    n = len(times)
+    if n <= history:
+        return
+    drop = n - history
+    del times[:drop]
+    del samples[:drop]
+    del energies[:drop]
+    del flags[:drop]
+
+
+def append_parsed(parsed, times, samples, energies, flags, history: int):
+    t, s, e, fl = parsed
+    times.append(t)
+    samples.append(s)
+    energies.append(e)
+    flags.append(fl)
+    if len(times) > history * 2:
+        trim_history(times, samples, energies, flags, history)
+
+
+def load_all(path: Path, times, samples, energies, flags, history: int) -> int:
     if not path.exists():
         return 0
-    offset = 0
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             parsed = parse_line(line)
             if parsed is not None:
-                t, s, e, fl = parsed
-                times.append(t)
-                samples.append(s)
-                energies.append(e)
-                flags.append(fl)
-        offset = f.tell()
-    return offset
+                append_parsed(parsed, times, samples, energies, flags, history)
+        trim_history(times, samples, energies, flags, history)
+        return f.tell()
+    return 0
 
 
 def quiet_energy_stats(times, energies, flags):
@@ -104,38 +131,63 @@ def quiet_energy_stats(times, energies, flags):
     return session_max, streak_max
 
 
+def update_quiet_on_point(timer_ms, energy, flag, session_max, streak_max):
+    """Incremental quiet-max update for one new sample."""
+    if timer_ms <= QUIET_MAX_START_MS:
+        return session_max, None
+    if flag == 0:
+        session_max = energy if session_max is None else max(session_max, energy)
+        streak_max = energy if streak_max is None else max(streak_max, energy)
+        return session_max, streak_max
+    return session_max, None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Overlay DFSDM sample, energy, and detect flag vs timer"
     )
     parser.add_argument("--log", default=str(DEFAULT_LOG))
     parser.add_argument("--dump-dir", default=str(DEFAULT_DUMP_DIR))
-    parser.add_argument("--history", type=int, default=20000)
-    parser.add_argument("--window", type=int, default=400)
+    parser.add_argument("--history", type=int, default=8000)
+    parser.add_argument("--window", type=int, default=800)
+    parser.add_argument(
+        "--span-ms",
+        type=int,
+        default=2000,
+        help="follow mode: show the last N milliseconds (smoother than fixed point count)",
+    )
     args = parser.parse_args()
     dump_dir = Path(args.dump_dir)
-    session_start = time.time()
 
     log_path = Path(args.log)
-    times = deque(maxlen=args.history)
-    samples = deque(maxlen=args.history)
-    energies = deque(maxlen=args.history)
-    flags = deque(maxlen=args.history)
+    times: list = []
+    samples: list = []
+    energies: list = []
+    flags: list = []
     follow = True
     offset = 0
     log_inode = None
+    session_quiet_max = None
+    streak_quiet_max = None
+    dump_mtime_seen = -1.0
 
     print(f"Waiting for {log_path} (start serial_monitor.py if needed)")
     while not log_path.exists():
         time.sleep(0.2)
 
-    def reload_log() -> None:
-        nonlocal offset, log_inode
+    def reload_log():
+        nonlocal offset, log_inode, session_quiet_max, streak_quiet_max
         times.clear()
         samples.clear()
         energies.clear()
         flags.clear()
-        offset = load_all(log_path, times, samples, energies, flags)
+        session_quiet_max = None
+        streak_quiet_max = None
+        offset = load_all(log_path, times, samples, energies, flags, args.history)
+        for t, e, fl in zip(times, energies, flags):
+            session_quiet_max, streak_quiet_max = update_quiet_on_point(
+                t, e, fl, session_quiet_max, streak_quiet_max
+            )
         try:
             log_inode = log_path.stat().st_ino
         except OSError:
@@ -165,10 +217,10 @@ def main() -> None:
     ax.patch.set_visible(False)
 
     (line_pcm,) = ax.plot(
-        [], [], lw=0.9, marker=".", ms=3, color="C0", label="sample (PCM)"
+        [], [], lw=0.9, color="C0", label="sample (PCM)"
     )
     (line_e,) = ax_e.plot(
-        [], [], lw=1.0, marker=".", ms=3, color="C1", label="energy"
+        [], [], lw=1.0, color="C1", label="energy"
     )
     (line_f,) = ax_f.plot(
         [], [], lw=1.4, drawstyle="steps-post", color="C2", label="debounce (UART)"
@@ -253,7 +305,7 @@ def main() -> None:
     ax_dump.set_ylabel("y (signed int32)", color="C0")
     ax_dump.axhline(0, color="0.6", lw=0.6)
     ax_dump.tick_params(axis="y", labelcolor="C0")
-    (line_dump,) = ax_dump.plot([], [], lw=0.9, marker=".", ms=2, color="C0")
+    (line_dump,) = ax_dump.plot([], [], lw=0.9, color="C0")
     dump_label = ax_dump.text(
         0.99, 0.97, "No dump yet",
         transform=ax_dump.transAxes,
@@ -263,7 +315,7 @@ def main() -> None:
     fig.text(
         0.01,
         0.01,
-        f"Source: {log_path.name}  ·  16-byte: sample, energy, debounce, timer  ·  orange dashed = energy {ENERGY_LOUD}",
+        f"Source: {log_path.name}  ·  13-byte: sample, energy, debounce(1), timer(4)  ·  orange dashed = energy {ENERGY_LOUD}",
         fontsize=8,
         color="0.4",
     )
@@ -312,32 +364,29 @@ def main() -> None:
             btn_pause.hovercolor = paused["hovercolor"]
             btn_follow.ax.set_facecolor(off["color"])
             btn_pause.ax.set_facecolor(paused["color"])
-        fig.canvas.draw_idle()
 
     def window_slice():
         n = len(samples)
         if n == 0:
             return [], [], [], []
+        if follow and args.span_ms > 0:
+            t_end = times[-1]
+            t_start = t_end - args.span_ms
+            # Walk back from the end for the time window (newest samples).
+            start = n - 1
+            while start > 0 and times[start - 1] >= t_start:
+                start -= 1
+            return times[start:], samples[start:], energies[start:], flags[start:]
         w = min(args.window, n)
         max_start = max(0, n - w)
-        if follow:
-            start = max_start
-            set_slider_range(start)
-        else:
-            start = int(min(slider.val, max_start))
+        start = max_start if follow else int(min(slider.val, max_start))
         end = start + w
-        return (
-            list(times)[start:end],
-            list(samples)[start:end],
-            list(energies)[start:end],
-            list(flags)[start:end],
-        )
+        return times[start:end], samples[start:end], energies[start:end], flags[start:end]
 
     def redraw(_=None):
         x, y, e, fl = window_slice()
-        session_max, streak_max = quiet_energy_stats(
-            list(times), list(energies), list(flags)
-        )
+        _, streak_max = quiet_energy_stats(x, e, fl)
+        session_max = session_quiet_max
 
         line_pcm.set_data(x, y)
         line_e.set_data(x, e)
@@ -385,6 +434,7 @@ def main() -> None:
     def on_follow(_event):
         nonlocal follow
         follow = True
+        set_slider_range(max_slider_start())
         style_buttons()
         redraw()
 
@@ -409,21 +459,24 @@ def main() -> None:
 
     def refresh_dump():
         """Check for a new buffer dump and update the bottom subplot."""
+        nonlocal dump_mtime_seen
         dp = latest_dump(dump_dir)
-        if dp is None or dp == last_dump_path[0]:
+        if dp is None:
             return False
         try:
-            if dp.stat().st_mtime < session_start:
-                return False
+            m = dp.stat().st_mtime
         except OSError:
             return False
-        last_dump_path[0] = dp
+        if m <= dump_mtime_seen and dp == last_dump_path[0]:
+            return False
         ys = load_dump(dp)
         if not ys:
             return False
+        dump_mtime_seen = m
+        last_dump_path[0] = dp
+        peak = max(abs(min(ys)), abs(max(ys)), 1)
         xs = list(range(len(ys)))
         line_dump.set_data(xs, ys)
-        peak = max(abs(min(ys)), abs(max(ys)), 1)
         ax_dump.set_xlim(0, len(ys) - 1)
         ax_dump.set_ylim(-peak * 1.3, peak * 1.3)
         dump_label.set_text(
@@ -432,8 +485,25 @@ def main() -> None:
         dump_label.set_color("C0")
         return True
 
+    def ingest_lines(text: str) -> int:
+        nonlocal session_quiet_max, streak_quiet_max
+        n = 0
+        for line in text.splitlines():
+            parsed = parse_line(line)
+            if parsed is None:
+                continue
+            append_parsed(
+                parsed, times, samples, energies, flags, args.history
+            )
+            t, _, e, fl = parsed
+            session_quiet_max, streak_quiet_max = update_quiet_on_point(
+                t, e, fl, session_quiet_max, streak_quiet_max
+            )
+            n += 1
+        return n
+
     def on_timer():
-        nonlocal offset, log_inode
+        nonlocal offset, log_inode, session_quiet_max, streak_quiet_max
         try:
             st = log_path.stat()
         except OSError:
@@ -442,35 +512,45 @@ def main() -> None:
             reload_log()
             redraw()
             return
+
+        behind = st.st_size - offset
         try:
             with log_path.open("r", encoding="utf-8") as f:
-                f.seek(offset)
-                extra = f.read()
-                offset = f.tell()
+                if follow and behind > CATCHUP_BYTES:
+                    # Jump near EOF so the UI stays real-time.
+                    f.seek(max(0, st.st_size - CATCHUP_BYTES))
+                    f.readline()  # drop partial line
+                    times.clear()
+                    samples.clear()
+                    energies.clear()
+                    flags.clear()
+                    session_quiet_max = None
+                    streak_quiet_max = None
+                    ingest_lines(f.read())
+                    trim_history(times, samples, energies, flags, args.history)
+                    offset = f.tell()
+                    extra = "catchup"
+                else:
+                    f.seek(offset)
+                    extra = f.read()
+                    offset = f.tell()
+                    if extra:
+                        ingest_lines(extra)
         except OSError:
             return
-        if extra:
-            for line in extra.splitlines():
-                parsed = parse_line(line)
-                if parsed is not None:
-                    t, s, e, fl = parsed
-                    times.append(t)
-                    samples.append(s)
-                    energies.append(e)
-                    flags.append(fl)
+
         dumped = refresh_dump()
         if follow:
             if extra or dumped:
                 redraw()
-        else:
-            set_slider_range(slider.val)
-            if dumped:
-                fig.canvas.draw_idle()
+        elif dumped:
+            fig.canvas.draw_idle()
 
     timer = fig.canvas.new_timer(interval=50)
     timer.add_callback(on_timer)
     timer.start()
     style_buttons()
+    refresh_dump()
     redraw()
     plt.show()
 
