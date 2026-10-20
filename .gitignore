@@ -16,3 +16,7 @@ build/
 *.log
 .openocd*
 .venv/
+
+__pycache__/
+*.py[cod]
+.venv/
