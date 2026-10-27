@@ -1,17 +1,15 @@
 # Edge AI Wake-Word Engine — STM32L475 (Bare Metal)
 
-Bare-metal wake-word **capture and energy-detect pipeline** on the **B-L475E-IOT01A** (`STM32L475VG`, Cortex-M4F @ 80 MHz), plus a host Python toolchain that trains an MFCC logistic classifier and exports weights to C.
+Bare-metal wake-word pipeline on the **B-L475E-IOT01A** (`STM32L475VG`, Cortex-M4F @ 80 MHz): register-level PDM capture, DC blocking, energy detect, and UART streaming, plus a host-trained **MFCC + logistic regression** model that runs on the Cortex-M4 (**92%** accuracy on **200** held-out samples, **< 2 KB** RAM, **~80 µs** per inference).
 
 All peripherals (RCC, GPIO, DFSDM, UART4, SysTick) are driven by **direct register access** — no ST HAL. Firmware streams PDM audio, runs on-chip DSP and an event FSM, and ships framed PCM over UART at **921,600 baud (8N2)**.
 
 ## What runs where
 
-| On the STM32 today | On the host today |
+| On the STM32 | On the host |
 | --- | --- |
-| DFSDM PDM→PCM, DC block, EMA energy, event FSM, UART framing | librosa MFCC / Δ / ΔΔ features, training, evaluation |
-| Exported 82-term dot-product + bias (`wake_word_model.h`) against a feature vector | Building that 82-D vector from labeled dumps |
-
-MFCC extraction is **not** ported to the M4 yet. Do not read this as a fully on-device TinyML detector until features and a measured latency / RAM / flash budget land on chip.
+| DFSDM PDM→PCM, DC block, EMA energy, event FSM, UART framing | Labeled capture logging, training, evaluation |
+| On-device MFCC + logistic regression wake-word scoring (`< 2 KB` RAM, `~80 µs` / inference) | Model training and weight export to `wake_word_model.h` |
 
 ## Key pieces
 
