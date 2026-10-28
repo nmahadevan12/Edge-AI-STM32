@@ -1,6 +1,6 @@
 # Edge AI Wake-Word Engine — STM32L475 (Bare Metal)
 
-Bare-metal wake-word pipeline on the **B-L475E-IOT01A** (`STM32L475VG`, Cortex-M4F @ 80 MHz): register-level PDM capture, DC blocking, energy detect, and UART streaming, plus a host-trained **MFCC + logistic regression** model that runs on the Cortex-M4 (**92%** accuracy on **200** held-out samples, **< 2 KB** RAM, **~80 µs** per inference).
+Bare-metal wake-word pipeline on the **B-L475E-IOT01A** (`STM32L475VG`, Cortex-M4F @ 80 MHz): register-level PDM capture, DC blocking, energy detect, and UART streaming, plus a host-trained **MFCC + logistic regression** model that runs on the Cortex-M4 (**92%** accuracy on **200** held-out samples, **~ 4.5 KB** RAM, **~80 µs** per inference).
 
 All peripherals (RCC, GPIO, DFSDM, UART4, SysTick) are driven by **direct register access** — no ST HAL. Firmware streams PDM audio, runs on-chip DSP and an event FSM, and ships framed PCM over UART at **921,600 baud (8N2)**.
 
