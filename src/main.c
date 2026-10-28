@@ -1,3 +1,14 @@
+#include "wake_word_model.h"
+#include "wake_features.h" /* ADDED: Wake_Score() = on-device features + model */
+
+/* ADDED: choose what happens when a 256-sample clip has been captured.
+ *   COLLECT_MODE 1 -> original behaviour: send the clip over UART (to record training data)
+ *   COLLECT_MODE 0 -> run the model on the clip and print the result */
+#ifndef COLLECT_MODE
+#define COLLECT_MODE   (0)
+#endif
+#define WAKE_THRESHOLD (0.0f) /* ADDED: score above this = "hey STM". Raise it to reduce false accepts */
+
 /* Unsigned Integer Types */
 typedef unsigned char       uint8_t;
 typedef unsigned short      uint16_t;
@@ -26,6 +37,11 @@ typedef double              float64_t;
 #define GPIOA_BASE      (AHB2PERIPH_BASE + 0U)
 #define GPIOE_BASE      (AHB2PERIPH_BASE + 0x1000U)
 #define SYSTICK_BASE    (0xE000E010U)
+
+/* ADDED: FPU access control register. The model uses floats; without enabling
+ * the FPU the first float instruction hard-faults. */
+#define SCB_CPACR       (*(volatile uint32_t *)(0xE000ED88U))
+#define FPU_FULL_ACCESS (0xFU << 20)
 
 /* RCC Register Addresses */
 #define RCC_CR          (*(volatile uint32_t *)(RCC_BASE))
@@ -148,13 +164,21 @@ typedef struct
 #define ENERGY_LOUD     (1500)
 #define REARM_DELAY     (500)
 
-uint32_t timer = 0; // defined globally since it's used for interrupts
+/* ADDED: the model was trained on clips of WAKE_N_SAMPLES samples, so the
+ * capture length must match it. */
+#if CAPACITY != WAKE_N_SAMPLES
+#error "CAPACITY must equal WAKE_N_SAMPLES in wake_word_model.h"
+#endif
+
+volatile uint32_t timer = 0; // CHANGED: added volatile. SysTick_Handler writes it and main reads it, so the compiler must not cache it
 uint16_t rearm_delay = REARM_DELAY;
 int32_t sample_buffer[CAPACITY]; // 1024 bytes total (y = 4 bytes)
 static uint16_t index = 0;
 static uint16_t loud_count = 0;
 static uint16_t low_count = 0;
 static uint8_t capturing = 0;
+
+static float wake_score = 0.0f; // FIXED: was missing the semicolon (compile error). Holds the latest model score
 
 struct DC_Blocker
 {
@@ -315,6 +339,52 @@ void Send_Sample_Buffer(void)
     Convert_Uint_To_Bytes(0x00000000UL, setting);
 }
 
+/* ADDED: tiny text output helpers for printing the result over UART */
+static void UART_Print(const char *str)
+{
+    while (*str) UART_Transmit(*str++);
+}
+
+static void UART_Print_Int(int32_t value)
+{
+    char digits[11];
+    uint8_t n = 0;
+    uint32_t u;
+
+    if (value < 0) 
+    {
+        UART_Transmit('-'); u = (uint32_t)(-(value + 1)) + 1U; 
+    }
+    else u = (uint32_t) value;
+
+    if (u == 0) 
+    { 
+        UART_Transmit('0'); return; 
+    }
+
+    while (u) 
+    { 
+        digits[n++] = (char)('0' + (u % 10U)); u /= 10U; 
+    }
+    while (n) UART_Transmit(digits[--n]);
+}
+
+/* ADDED: run the trained model on the captured clip and print the result.
+ * Prints "HEY <score*100>" or "other <score*100>". */
+static void Run_Wake_Inference(void)
+{
+    static float wave[CAPACITY]; // static so the 1 KB buffer is not on the stack
+    uint16_t i;
+
+    for (i = 0; i < CAPACITY; i++) wave[i] = (float) sample_buffer[i]; // int32 -> float, same values as the CSV "y" column
+
+    wake_score = Wake_Score(wave); // > 0 means "hey STM"
+
+    UART_Print((wake_score > WAKE_THRESHOLD) ? "HEY " : "other ");
+    UART_Print_Int((int32_t)(wake_score * 100.0f));
+    UART_Print("\r\n");
+}
+
 // Capture exactly CAPACITY PCM samples after the first time energy > 1000
 // After CAPACITY samples, keep/send only if loud_count >= DEBOUNCE_VAL
 void Sound_Detect(uint32_t energy, int32_t y)
@@ -381,7 +451,11 @@ void Sound_Detect(uint32_t energy, int32_t y)
     {
         if (loud_count >= DEBOUNCE_VAL) // tracks the amount of val > 1000
         {
-            Send_Sample_Buffer(); // send sample_buffer
+#if COLLECT_MODE
+            Send_Sample_Buffer(); // send sample_buffer (original behaviour, for recording data)
+#else
+            Run_Wake_Inference(); // CHANGED: classify the clip on-device instead of sending it
+#endif
         }
 
         // reset variables/flags
@@ -504,11 +578,16 @@ void SysTick_Handler(void)
 
 int main(void)
 {
-    UART4_GPIO_Init(); // initialize UART4 pin
-    UART_Setup(); // setup UART
-    SysTick_Init(); // initialize SysTick
-    Mic_Setup(); // setup mic
-    DFSDM_Setup(); // digital filter setup
+    /* ADDED: enable the FPU before any float code runs */
+    SCB_CPACR |= FPU_FULL_ACCESS;
+    __asm volatile ("dsb");
+    __asm volatile ("isb");
+
+    UART4_GPIO_Init();  // initialize UART4 pin
+    UART_Setup();       // setup UART
+    SysTick_Init();     // initialize SysTick
+    Mic_Setup();        // setup mic
+    DFSDM_Setup();      // digital filter setup
     uint8_t setting = 4;
 
     volatile uint16_t delay;
